@@ -1091,8 +1091,9 @@ def http_brute(target, open_ports):
                 pass
 
     # Command → Manual steps → Troubleshooting (HTTP login)
-    first_web_port = next(iter(web_ports), 80)
-    scheme = "https" if first_web_port in (443, 8443) else "http"
+    # Prefer standard ports 80 then 443 for the printed URL (not iteration order)
+    first_web_port = 80 if 80 in web_ports else (443 if 443 in web_ports else next(iter(web_ports)))
+    scheme = "https" if first_web_port == 443 else "http"
     base_http = f"{scheme}://{target}" if first_web_port in (80, 443) else f"{scheme}://{target}:{first_web_port}"
     print(f"\n  {C.MAGENTA}{C.BOLD}📌 Command to try:{C.RESET}  hydra -L users.txt -P pass.txt {base_http}/login.php http-post-form \"username=^USER^&password=^PASS^:Invalid\"")
     manual_steps("How to do it manually (HTTP login brute)", [
