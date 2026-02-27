@@ -149,6 +149,15 @@ def manual_steps(title, steps):
     print()
 
 
+def pause_after_step(explanation):
+    """Print how the step works and wait for Enter before continuing."""
+    print(f"\n  {C.CYAN}{C.BOLD}How it works:{C.RESET} {explanation}")
+    try:
+        input(f"  {C.DIM}Press Enter to continue to next step...{C.RESET}")
+    except (EOFError, KeyboardInterrupt):
+        print()
+
+
 def troubleshoot(problems):
     """Print a 'Having problems?' section. problems = list of (symptom, solution) tuples."""
     print(f"\n  {C.YELLOW}{C.BOLD}🔧 Having problems?{C.RESET}")
@@ -1796,7 +1805,8 @@ VULN_EXAMPLE_BY_TITLE = {
 
 
 def on_vuln_stop(target):
-    """Called when scan stops on first CRITICAL/HIGH vuln: show what we found, how to try it yourself, and CVE search."""
+    """Called when scan stops on first CRITICAL/HIGH vuln: show what we found, how to try it yourself, and CVE search.
+    Returns True if user wants to continue the scan, False to exit after generating report."""
     vulns_stop = [v for v in REPORT["vulnerabilities"] if v["severity"] in STOP_SEVERITIES]
     if not vulns_stop:
         return
@@ -1844,6 +1854,15 @@ def on_vuln_stop(target):
     except (EOFError, KeyboardInterrupt):
         pass
 
+    # Ask whether to continue the scan or exit (so script does not close just because browser opened or user said n)
+    try:
+        cont = input(f"\n  {C.BOLD}Continue with the rest of the scan? (y/n): {C.RESET}").strip().lower()
+        if cont in ("y", "yes"):
+            return True
+    except (EOFError, KeyboardInterrupt):
+        pass
+    return False
+
 
 # ─────────────────────────────────────────────────────────
 #  MAIN
@@ -1865,76 +1884,82 @@ def main():
         print("  Smart choice. Always get authorization first!")
         sys.exit(0)
 
+    # Step explanations (shown after each step so user can read how it works)
+    STEP_EXPLANATIONS = [
+        "Host discovery: we ping the target or probe with TCP to see if it is up. No open ports are scanned yet.",
+        "Port scan: we try to connect to many common ports (21, 22, 80, 443, etc.). Open ports tell us which services are running.",
+        "Banner grab: we connect to each open port and read the first bytes the service sends. Banners often reveal software and version.",
+        "FTP check: we try anonymous login (user 'anonymous', empty password). Many misconfigured FTP servers allow this.",
+        "Web enumeration: we request common paths (/, /admin, /login) and check headers and responses. We also look for CMS (WordPress, etc.).",
+        "SQL injection: we send payloads like ' OR 1=1-- and time delays to login/params. Errors or long delays can mean SQLi.",
+        "XSS check: we send script payloads in common parameters. If the payload appears in the response, reflected XSS may be possible.",
+        "LFI check: we try parameters like ?file=../../../etc/passwd. If file content appears in the response, LFI is likely.",
+        "SSH brute: we try default username/password pairs (e.g. root:root, admin:admin) on port 22.",
+        "FTP brute: we try the same default creds on FTP. Weak or default FTP logins are common on lab VMs.",
+        "HTTP login brute: we find login forms and POST default usernames/passwords. Success is detected by response change or keywords.",
+        "SMB check: we detect if port 139/445 is open. SMB can reveal shares, users, and is often used for lateral movement.",
+        "Other services: we check MySQL, Redis, MongoDB, Telnet for default or missing auth. Unauthenticated Redis is critical.",
+        "Reverse shell generator: we show ready-to-use payloads (bash, python, etc.) so you can get a shell after exploiting a vuln.",
+        "Post-exploitation: we list next steps (persistence, privilege escalation) you can do after getting initial access.",
+        "Final summary: we list critical/high findings and credentials. Use the HTML report for a full overview.",
+    ]
+
+    def handle_stop():
+        if not REPORT.get("stop_requested"):
+            return True
+        if on_vuln_stop(target):
+            REPORT["stop_requested"] = False
+            return True
+        generate_html_report(target)
+        sys.exit(0)
+
     # ── Run all modules (stop on first CRITICAL/HIGH vuln if STOP_ON_VULN) ──
     try:
         host_discovery(target)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[0])
+        handle_stop()
         open_ports = port_scan(target)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[1])
+        handle_stop()
         banners = banner_grab(target, open_ports)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[2])
+        handle_stop()
         check_ftp(target, open_ports)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[3])
+        handle_stop()
         web_enumeration(target, open_ports)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[4])
+        handle_stop()
         sqli_check(target, open_ports)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[5])
+        handle_stop()
         xss_check(target, open_ports)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[6])
+        handle_stop()
         lfi_check(target, open_ports)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[7])
+        handle_stop()
         ssh_brute(target, open_ports)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[8])
+        handle_stop()
         ftp_brute(target, open_ports)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[9])
+        handle_stop()
         http_brute(target, open_ports)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[10])
+        handle_stop()
         smb_check(target, open_ports)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[11])
+        handle_stop()
         check_other_services(target, open_ports)
-        if REPORT.get("stop_requested"):
-            on_vuln_stop(target)
-            generate_html_report(target)
-            sys.exit(0)
+        pause_after_step(STEP_EXPLANATIONS[12])
+        handle_stop()
         reverse_shell_generator(target)
+        pause_after_step(STEP_EXPLANATIONS[13])
         post_exploitation_guide()
+        pause_after_step(STEP_EXPLANATIONS[14])
         final_summary(target)
+        pause_after_step(STEP_EXPLANATIONS[15])
         report_path = generate_html_report(target)
         print(f"\n  {C.GREEN}{C.BOLD}✓ Done! Open the HTML report in your browser.{C.RESET}\n")
 
